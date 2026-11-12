@@ -1,0 +1,989 @@
+  <!-- Carga del SDK de Firebase en tiempo real -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { 
+      getFirestore, 
+      collection, 
+      doc, 
+      setDoc, 
+      updateDoc, 
+      deleteDoc, 
+      onSnapshot, 
+      query 
+    } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+    // Configuración de tu proyecto Firebase (ONP Control Patrimonial)
+    const firebaseConfig = {
+      projectId: "onp-control-patrimonial",
+      authDomain: "onp-control-patrimonial.firebaseapp.com",
+    };
+
+    // Inicializar Firebase y base de datos
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const coleccionAtenciones = collection(db, "atenciones");
+
+    let idAEliminar = null;
+    let vistaActual = 'registros';
+    let ultimoCorrelativoNumero = 0;
+    let registros = [];
+
+    const LISTA_DIGITACION = [
+      'CAMILA', 'IANDRI', 'YARSLENI', 'VALENTINO', 'TASHINA', 'ADLER',
+      'ASISTENTE DIG. 1', 'ASISTENTE DIG. 2', 'ASISTENTE DIG. 3'
+    ];
+
+    const LISTA_MOVIMIENTO = [
+      'LUIS', 'JORGE', 'JORGE-LUIS', 'VALENTINO', 'IANDRI', 'ADLER',
+      'ASISTENTE MOV. 1', 'ASISTENTE MOV. 2', 'ASISTENTE MOV. 3'
+    ];
+
+    function formatearCorrelativo(num) {
+      return 'COR-' + String(num).padStart(4, '0');
+    }
+
+    function obtenerSiguienteCorrelativo() {
+      const maxEnRegistros = registros.reduce((max, r) => {
+        const n = r.correlativoNum || parseInt(String(r.correlativo || '').replace(/\D/g, ''), 10) || 0;
+        return n > max ? n : max;
+      }, 0);
+      const base = Math.max(ultimoCorrelativoNumero, maxEnRegistros);
+      return base + 1;
+    }
+
+    // ESCUCHAR FIRESTORE EN TIEMPO REAL
+    const q = query(coleccionAtenciones);
+    onSnapshot(q, (snapshot) => {
+      registros = [];
+      snapshot.forEach((docSnap) => {
+        registros.push(docSnap.data());
+      });
+      const maxActual = registros.reduce((m, r) => Math.max(m, r.correlativoNum || 0), 0);
+      if (maxActual > ultimoCorrelativoNumero) {
+        ultimoCorrelativoNumero = maxActual;
+      }
+      renderizar();
+    }, (error) => {
+      console.error("Error cargando Firestore: ", error);
+    });
+
+    // GUARDAR EN FIRESTORE (CREAR O EDITAR)
+    async function guardarAtencion(e) {
+      e.preventDefault();
+      const id = document.getElementById('campoId').value;
+      const ticketVal = document.getElementById('campoTicket').value.trim();
+      const documentoVal = document.getElementById('campoDocumento').value.trim();
+
+      const { dupTicket, dupDoc } = verificarDuplicadosEnTiempoReal();
+      if (dupTicket || dupDoc) {
+        mostrarToast('⚠ Código duplicado detectado. Revisa el N° Ticket o N° Documento.');
+        return;
+      }
+
+      const finalizadoVal = document.querySelector('input[name="campoFinalizado"]:checked').value;
+      const movCulminadoVal = document.querySelector('input[name="campoMovCulminado"]:checked').value;
+      const anuladoVal = document.querySelector('input[name="campoAnulado"]:checked').value;
+      const obsAnulacionVal = anuladoVal === 'SI' ? document.getElementById('campoObsAnulacion').value.trim() : '';
+
+      let fechaMovVal = document.getElementById('campoFechaCulminacionMov').value;
+      if (movCulminadoVal === 'SI' && !fechaMovVal) {
+        fechaMovVal = obtenerFechaHoraISOActual();
+      }
+
+      const docId = id || String(Date.now());
+      let nuevoNum = ultimoCorrelativoNumero;
+      let nuevoCorrelativo = "";
+
+      if (!id) {
+        nuevoNum = obtenerSiguienteCorrelativo();
+        ultimoCorrelativoNumero = nuevoNum;
+        nuevoCorrelativo = formatearCorrelativo(nuevoNum);
+      } else {
+        nuevoCorrelativo = document.getElementById('campoCorrelativo').value;
+      }
+
+      const datos = {
+        id: docId,
+        correlativo: nuevoCorrelativo,
+        correlativoNum: id ? (registros.find(r => r.id === id)?.correlativoNum || nuevoNum) : nuevoNum,
+        ticket: ticketVal,
+        usuario: document.getElementById('campoUsuario').value.trim(),
+        correo: document.getElementById('campoCorreo').value.trim(),
+        asunto: document.getElementById('campoAsunto').value.trim(),
+        fechaCorreo: document.getElementById('campoFechaCorreo').value,
+        documento: documentoVal,
+        digitacion: document.getElementById('campoDigitacion').value,
+        movimiento: document.getElementById('campoMovimiento').value,
+        movCulminado: movCulminadoVal,
+        fechaCulminacionMov: fechaMovVal,
+        prioridad: document.getElementById('campoPrioridad').value,
+        fechaAtencion: document.getElementById('campoFechaAtencion').value,
+        observaciones: document.getElementById('campoObservaciones').value.trim(),
+        finalizado: finalizadoVal,
+        anulado: anuladoVal,
+        obsAnulacion: obsAnulacionVal
+      };
+
+      try {
+        await setDoc(doc(db, "atenciones", docId), datos);
+        mostrarToast(id ? 'Registro actualizado correctamente' : `Atención registrada con éxito (${nuevoCorrelativo})`);
+        cerrarModalFormulario();
+      } catch (err) {
+        mostrarToast('Error al guardar en la nube');
+        console.error(err);
+      }
+    }
+
+    // ALTERNAR CULMINADO DESDE LA TABLA
+    async function alternarMovCulminado(id) {
+      const item = registros.find(r => r.id === id);
+      if (!item || item.anulado === 'SI') return;
+      const nuevoEstado = item.movCulminado === 'SI' ? 'NO' : 'SI';
+      const nuevaFecha = nuevoEstado === 'SI' ? obtenerFechaHoraISOActual() : '';
+      
+      try {
+        await updateDoc(doc(db, "atenciones", id), {
+          movCulminado: nuevoEstado,
+          fechaCulminacionMov: nuevaFecha
+        });
+        mostrarToast(nuevoEstado === 'SI' ? 'Movimiento culminado registrado' : 'Movimiento marcado como pendiente');
+      } catch (err) {
+        mostrarToast('Error al actualizar en Firestore');
+      }
+    }
+
+    // ALTERNAR FINALIZADO DESDE LA TABLA
+    async function alternarFinalizado(id) {
+      const item = registros.find(r => r.id === id);
+      if (!item || item.anulado === 'SI') return;
+      const nuevoEstado = item.finalizado === 'SI' ? 'NO' : 'SI';
+      const nuevaFechaAtencion = nuevoEstado === 'SI' && !item.fechaAtencion ? obtenerFechaHoraISOActual() : (item.fechaAtencion || '');
+
+      try {
+        await updateDoc(doc(db, "atenciones", id), {
+          finalizado: nuevoEstado,
+          fechaAtencion: nuevaFechaAtencion
+        });
+        mostrarToast(`Estado cambiado a: ${nuevoEstado}`);
+      } catch (err) {
+        mostrarToast('Error al actualizar');
+      }
+    }
+
+    // ELIMINAR DE FIRESTORE
+    async function confirmarEliminar() {
+      if (!idAEliminar) return;
+      try {
+        await deleteDoc(doc(db, "atenciones", idAEliminar));
+        mostrarToast('Registro eliminado exitosamente de Firestore');
+        cerrarModalEliminar();
+      } catch (err) {
+        mostrarToast('Error al eliminar');
+      }
+    }
+
+    // BUSCAR DUPLICADOS
+    function buscarDuplicados(ticket, documento, idActual) {
+      const tNorm = (ticket || '').trim().toUpperCase();
+      const dNorm = (documento || '').trim().toUpperCase();
+      let dupTicket = null;
+      let dupDoc = null;
+
+      if (tNorm) {
+        dupTicket = registros.find(r => r.id !== idActual && (r.ticket || '').trim().toUpperCase() === tNorm);
+      }
+      if (dNorm) {
+        dupDoc = registros.find(r => r.id !== idActual && (r.documento || '').trim().toUpperCase() === dNorm);
+      }
+      return { dupTicket, dupDoc };
+    }
+
+    function verificarDuplicadosEnTiempoReal() {
+      const idActual = document.getElementById('campoId').value;
+      const ticket = document.getElementById('campoTicket').value;
+      const documento = document.getElementById('campoDocumento').value;
+
+      const { dupTicket, dupDoc } = buscarDuplicados(ticket, documento, idActual);
+
+      const inputTicket = document.getElementById('campoTicket');
+      const inputDoc = document.getElementById('campoDocumento');
+      const msgTicket = document.getElementById('msgDupTicket');
+      const msgDoc = document.getElementById('msgDupDocumento');
+      const alertaBox = document.getElementById('alertaDuplicado');
+      const textoAlerta = document.getElementById('textoAlertaDuplicado');
+
+      const mensajes = [];
+
+      if (dupTicket) {
+        inputTicket.classList.add('border-rose-500', 'bg-rose-50/40');
+        msgTicket.textContent = `Código duplicado: Ya existe en ${dupTicket.correlativo}`;
+        msgTicket.classList.remove('hidden');
+        mensajes.push(`El N° de Ticket "${ticket.trim()}" está duplicado (registrado en ${dupTicket.correlativo} - ${dupTicket.usuario}).`);
+      } else {
+        inputTicket.classList.remove('border-rose-500', 'bg-rose-50/40');
+        msgTicket.classList.add('hidden');
+      }
+
+      if (dupDoc) {
+        inputDoc.classList.add('border-rose-500', 'bg-rose-50/40');
+        msgDoc.textContent = `Documento duplicado: Ya existe en ${dupDoc.correlativo}`;
+        msgDoc.classList.remove('hidden');
+        mensajes.push(`El N° de Documento "${documento.trim()}" está duplicado (registrado en ${dupDoc.correlativo} - ${dupDoc.usuario}).`);
+      } else {
+        inputDoc.classList.remove('border-rose-500', 'bg-rose-50/40');
+        msgDoc.classList.add('hidden');
+      }
+
+      if (mensajes.length > 0) {
+        textoAlerta.innerHTML = mensajes.join('<br/>');
+        alertaBox.classList.remove('hidden');
+      } else {
+        alertaBox.classList.add('hidden');
+      }
+
+      return { dupTicket, dupDoc };
+    }
+
+    function cambiarVista(vista) {
+      vistaActual = vista;
+      const secReg = document.getElementById('vistaRegistros');
+      const secDash = document.getElementById('vistaDashboard');
+      const btnReg = document.getElementById('btnTabRegistros');
+      const btnDash = document.getElementById('btnTabDashboard');
+
+      if (vista === 'dashboard') {
+        secReg.classList.add('hidden');
+        secDash.classList.remove('hidden');
+        btnDash.className = 'px-3 py-1.5 rounded-md text-xs sm:text-sm font-semibold bg-white text-[#2e1a66] shadow transition cursor-pointer flex items-center gap-1.5';
+        btnReg.className = 'px-3 py-1.5 rounded-md text-xs sm:text-sm font-semibold text-indigo-100 hover:text-white transition cursor-pointer';
+        renderizarDashboard();
+      } else {
+        secDash.classList.add('hidden');
+        secReg.classList.remove('hidden');
+        btnReg.className = 'px-3 py-1.5 rounded-md text-xs sm:text-sm font-semibold bg-white text-[#2e1a66] shadow transition cursor-pointer';
+        btnDash.className = 'px-3 py-1.5 rounded-md text-xs sm:text-sm font-semibold text-indigo-100 hover:text-white transition cursor-pointer flex items-center gap-1.5';
+        renderizar();
+      }
+    }
+
+    function calcularPorcentaje(parte, total) {
+      if (!total || total === 0) return 0;
+      return Math.round((parte / total) * 100);
+    }
+
+    function mostrarToast(mensaje) {
+      const toast = document.getElementById('toast');
+      toast.textContent = mensaje;
+      toast.classList.remove('hidden');
+      setTimeout(() => toast.classList.add('hidden'), 3500);
+    }
+
+    function obtenerFechaHoraISOActual() {
+      const ahora = new Date();
+      ahora.setMinutes(ahora.getMinutes() - ahora.getTimezoneOffset());
+      return ahora.toISOString().slice(0, 16);
+    }
+
+    function formatearFechaHora(valor) {
+      if (!valor) return '-';
+      return valor.replace('T', ' ');
+    }
+
+    function badgePrioridad(p) {
+      if (p === 'ALTA') return '<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-700">ALTA</span>';
+      if (p === 'MEDIA') return '<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-700">MEDIA</span>';
+      return '<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-100 text-sky-700">BAJA</span>';
+    }
+
+    function escaparHTML(texto) {
+      if (!texto) return '';
+      return String(texto)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function actualizarEstadisticas() {
+      const validas = registros.filter(r => r.anulado !== 'SI');
+      const total = validas.length;
+      const pendientes = validas.filter(r => r.finalizado === 'NO').length;
+      const finalizadas = validas.filter(r => r.finalizado === 'SI').length;
+      const conMov = validas.filter(r => r.movimiento && r.movimiento.trim() !== '').length;
+      const movPendiente = validas.filter(r => r.movimiento && r.movCulminado !== 'SI').length;
+      const anuladas = registros.filter(r => r.anulado === 'SI').length;
+
+      document.getElementById('statTotal').textContent = total;
+      document.getElementById('statPendientes').textContent = pendientes;
+      document.getElementById('statPendientesPct').textContent = `${calcularPorcentaje(pendientes, total)}%`;
+
+      document.getElementById('statFinalizadas').textContent = finalizadas;
+      document.getElementById('statFinalizadasPct').textContent = `${calcularPorcentaje(finalizadas, total)}%`;
+
+      document.getElementById('statMovPendiente').textContent = movPendiente;
+      document.getElementById('statMovPendientePct').textContent = `${calcularPorcentaje(movPendiente, conMov)}%`;
+
+      document.getElementById('statAnuladas').textContent = anuladas;
+    }
+
+    function renderizar() {
+      actualizarEstadisticas();
+      if (vistaActual === 'dashboard') {
+        renderizarDashboard();
+        return;
+      }
+
+      const busq = document.getElementById('filtroBusqueda').value.toLowerCase().trim();
+      const est = document.getElementById('filtroEstado').value;
+      const prio = document.getElementById('filtroPrioridad').value;
+      const asist = document.getElementById('filtroAsistente').value;
+      const orden = document.getElementById('ordenSelect').value;
+
+      let filtrados = registros.filter(r => {
+        const coincideTexto = !busq ||
+          (r.correlativo && r.correlativo.toLowerCase().includes(busq)) ||
+          (r.ticket && r.ticket.toLowerCase().includes(busq)) ||
+          (r.asunto && r.asunto.toLowerCase().includes(busq)) ||
+          (r.usuario && r.usuario.toLowerCase().includes(busq)) ||
+          (r.correo && r.correo.toLowerCase().includes(busq)) ||
+          (r.documento && r.documento.toLowerCase().includes(busq)) ||
+          (r.observaciones && r.observaciones.toLowerCase().includes(busq)) ||
+          (r.obsAnulacion && r.obsAnulacion.toLowerCase().includes(busq));
+
+        let coincideEstado = true;
+        if (est === 'ANULADO') {
+          coincideEstado = r.anulado === 'SI';
+        } else if (est === 'SI' || est === 'NO') {
+          coincideEstado = r.anulado !== 'SI' && r.finalizado === est;
+        }
+
+        const coincidePrio = !prio || r.prioridad === prio;
+        const coincideAsist = !asist || r.digitacion === asist || r.movimiento === asist;
+
+        return coincideTexto && coincideEstado && coincidePrio && coincideAsist;
+      });
+
+      if (orden === 'recientes') {
+        filtrados.sort((a, b) => (b.correlativoNum || Number(b.id)) - (a.correlativoNum || Number(a.id)));
+      } else if (orden === 'antiguos') {
+        filtrados.sort((a, b) => (a.correlativoNum || Number(a.id)) - (b.correlativoNum || Number(b.id)));
+      } else if (orden === 'prioridad') {
+        const peso = { ALTA: 1, MEDIA: 2, BAJA: 3 };
+        filtrados.sort((a, b) => (peso[a.prioridad] || 9) - (peso[b.prioridad] || 9));
+      }
+
+      document.getElementById('contadorRegistros').textContent = filtrados.length;
+
+      const tbody = document.getElementById('tablaCuerpo');
+      const movil = document.getElementById('listaMovil');
+      const vacio = document.getElementById('estadoVacio');
+
+      tbody.innerHTML = '';
+      movil.innerHTML = '';
+
+      if (filtrados.length === 0) {
+        vacio.classList.remove('hidden');
+        return;
+      } else {
+        vacio.classList.add('hidden');
+      }
+
+      filtrados.forEach(r => {
+        const esAnulado = r.anulado === 'SI';
+        const esSi = r.finalizado === 'SI';
+        const btnEstadoClase = esSi
+          ? 'bg-emerald-100 text-emerald-800 border-emerald-300 hover:bg-emerald-200'
+          : 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200';
+
+        const movCulm = r.movCulminado === 'SI';
+        const btnMovClase = movCulm
+          ? 'bg-blue-600 text-white border-blue-600 hover:bg-blue-700'
+          : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-blue-50';
+
+        const tr = document.createElement('tr');
+        tr.className = esAnulado
+          ? 'bg-rose-50/70 hover:bg-rose-100/60 opacity-90'
+          : (esSi ? 'bg-slate-50/60 hover:bg-slate-100/70' : 'hover:bg-indigo-50/40');
+
+        tr.innerHTML = `
+          <td class="py-3 px-3 whitespace-nowrap">
+            <span class="px-2 py-0.5 bg-indigo-950 text-white rounded text-xs font-mono font-bold">${escaparHTML(r.correlativo)}</span>
+          </td>
+          <td class="py-3 px-3 whitespace-nowrap">
+            ${r.ticket ? `<span class="px-2 py-0.5 bg-slate-800 text-white rounded text-xs font-mono font-semibold ${esAnulado ? 'line-through opacity-75' : ''}">${escaparHTML(r.ticket)}</span>` : '<span class="text-slate-400 text-xs">Sin ticket</span>'}
+          </td>
+          <td class="py-3 px-3">
+            <div class="font-semibold text-slate-800 ${esAnulado ? 'line-through text-slate-500' : ''}">${escaparHTML(r.usuario)}</div>
+            <div class="text-xs text-slate-500">${escaparHTML(r.correo)}</div>
+          </td>
+          <td class="py-3 px-3 max-w-[220px] truncate text-xs font-medium text-slate-700" title="${escaparHTML(r.asunto)}">
+            ${escaparHTML(r.asunto || '-')}
+          </td>
+          <td class="py-3 px-3 whitespace-nowrap text-slate-700">${escaparHTML(r.fechaCorreo)}</td>
+          <td class="py-3 px-3 font-medium text-indigo-900 whitespace-nowrap ${esAnulado ? 'line-through opacity-75' : ''}">${escaparHTML(r.documento)}</td>
+          <td class="py-3 px-3 whitespace-nowrap">
+            ${r.digitacion ? `<span class="px-2 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 rounded text-xs font-semibold">${escaparHTML(r.digitacion)}</span>` : '<span class="text-slate-400 text-xs">-</span>'}
+          </td>
+          <td class="py-3 px-3 whitespace-nowrap">
+            ${r.movimiento ? `<span class="px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-xs font-semibold">${escaparHTML(r.movimiento)}</span>` : '<span class="text-slate-400 text-xs">-</span>'}
+          </td>
+          <td class="py-3 px-3 text-center whitespace-nowrap">
+            ${esAnulado ? '<span class="text-xs text-rose-600 font-semibold">Anulado</span>' : `
+            <div class="flex flex-col items-center gap-1">
+              <button type="button" onclick="alternarMovCulminado('${r.id}')" class="px-2.5 py-0.5 rounded-full text-[11px] font-bold border transition cursor-pointer ${btnMovClase}">
+                ${movCulm ? '✓ Culminado' : 'Pendiente'}
+              </button>
+              <span class="text-[11px] text-slate-500">${movCulm && r.fechaCulminacionMov ? escaparHTML(formatearFechaHora(r.fechaCulminacionMov)) : '-'}</span>
+            </div>`}
+          </td>
+          <td class="py-3 px-3 whitespace-nowrap">${badgePrioridad(r.prioridad)}</td>
+          <td class="py-3 px-3 whitespace-nowrap text-xs text-slate-600">${escaparHTML(formatearFechaHora(r.fechaAtencion))}</td>
+          <td class="py-3 px-3 max-w-xs text-xs text-slate-600">
+            <div class="truncate" title="${escaparHTML(r.observaciones)}">${escaparHTML(r.observaciones || '-')}</div>
+            ${esAnulado && r.obsAnulacion ? `<div class="mt-1 text-[11px] font-semibold text-rose-700 bg-rose-100/80 px-2 py-0.5 rounded truncate" title="${escaparHTML(r.obsAnulacion)}">Motivo: ${escaparHTML(r.obsAnulacion)}</div>` : ''}
+          </td>
+          <td class="py-3 px-3 text-center whitespace-nowrap">
+            ${esAnulado
+              ? `<span class="px-3 py-1 rounded-full text-xs font-extrabold bg-rose-600 text-white shadow-2xs inline-block">ANULADO</span>`
+              : `<button type="button" onclick="alternarFinalizado('${r.id}')" class="px-3 py-1 rounded-full text-xs font-bold border transition cursor-pointer ${btnEstadoClase}">${r.finalizado}</button>`
+            }
+          </td>
+          <td class="py-3 px-3 text-right whitespace-nowrap space-x-1">
+            <button type="button" onclick="editarRegistro('${r.id}')" class="px-2.5 py-1 text-xs font-medium bg-slate-100 hover:bg-indigo-100 text-indigo-700 rounded-lg cursor-pointer">Editar</button>
+            <button type="button" onclick="pedirEliminar('${r.id}')" class="px-2.5 py-1 text-xs font-medium bg-slate-100 hover:bg-rose-100 text-rose-700 rounded-lg cursor-pointer">Eliminar</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+
+        const card = document.createElement('div');
+        card.className = esAnulado
+          ? 'bg-rose-50/70 rounded-xl p-4 shadow-sm border border-rose-300 space-y-2.5'
+          : 'bg-white rounded-xl p-4 shadow-sm border border-slate-200 space-y-2.5';
+
+        card.innerHTML = `
+          <div class="flex items-start justify-between gap-2">
+            <div>
+              <div class="flex flex-wrap items-center gap-1.5 mb-1">
+                <span class="px-2 py-0.5 bg-indigo-950 text-white rounded text-[11px] font-mono font-bold">${escaparHTML(r.correlativo)}</span>
+                ${r.ticket ? `<span class="px-2 py-0.5 bg-slate-800 text-white rounded text-[11px] font-mono font-semibold">${escaparHTML(r.ticket)}</span>` : ''}
+                ${badgePrioridad(r.prioridad)}
+                ${esAnulado ? `<span class="px-2 py-0.5 bg-rose-600 text-white rounded text-[11px] font-extrabold">ANULADO</span>` : ''}
+              </div>
+              <div class="font-bold text-slate-800 text-sm ${esAnulado ? 'line-through text-slate-500' : ''}">${escaparHTML(r.usuario)}</div>
+              <div class="text-xs text-slate-500 break-all">${escaparHTML(r.correo)}</div>
+            </div>
+          </div>
+
+          <div class="bg-indigo-50/60 px-2.5 py-2 rounded-lg border border-indigo-100 text-xs">
+            <span class="text-indigo-500 font-semibold block text-[11px] uppercase">Asunto</span>
+            <span class="text-slate-800 font-medium">${escaparHTML(r.asunto || '-')}</span>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2 text-xs bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+            <div><span class="text-slate-400 block">N° Documento</span><strong class="text-slate-700">${escaparHTML(r.documento)}</strong></div>
+            <div><span class="text-slate-400 block">Fecha Correo</span><strong class="text-slate-700">${escaparHTML(r.fechaCorreo)}</strong></div>
+            <div><span class="text-slate-400 block">Digitación</span><strong class="text-purple-700">${escaparHTML(r.digitacion || '-')}</strong></div>
+            <div><span class="text-slate-400 block">Movimiento</span><strong class="text-blue-700">${escaparHTML(r.movimiento || '-')}</strong></div>
+            <div class="col-span-2"><span class="text-slate-400 block">Fecha/Hora Atención</span><strong class="text-slate-700">${escaparHTML(formatearFechaHora(r.fechaAtencion))}</strong></div>
+          </div>
+
+          ${!esAnulado ? `
+          <div class="bg-blue-50/70 p-2.5 rounded-lg border border-blue-200 flex items-center justify-between gap-2">
+            <div class="text-xs">
+              <span class="text-blue-900 font-semibold block">Culminación Movimiento:</span>
+              <span class="text-blue-700">${movCulm && r.fechaCulminacionMov ? escaparHTML(formatearFechaHora(r.fechaCulminacionMov)) : 'Sin culminar'}</span>
+            </div>
+            <button type="button" onclick="alternarMovCulminado('${r.id}')" class="px-2.5 py-1 rounded-lg text-xs font-bold border transition cursor-pointer ${btnMovClase}">
+              ${movCulm ? '✓ SI' : 'Marcar SI'}
+            </button>
+          </div>` : ''}
+
+          ${r.observaciones ? `<p class="text-xs text-slate-600 bg-amber-50/50 p-2 rounded border border-amber-100">${escaparHTML(r.observaciones)}</p>` : ''}
+
+          ${esAnulado ? `
+          <div class="text-xs text-rose-800 bg-rose-100 p-2.5 rounded-lg border border-rose-300">
+            <strong class="block text-rose-950">Observación de Anulación:</strong>
+            ${escaparHTML(r.obsAnulacion || 'Sin detalle')}
+          </div>` : ''}
+
+          <div class="flex items-center justify-between pt-2 border-t border-slate-100">
+            ${esAnulado
+              ? `<span class="px-3 py-1.5 rounded-lg text-xs font-extrabold bg-rose-600 text-white">ANULADA</span>`
+              : `<button type="button" onclick="alternarFinalizado('${r.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold border transition cursor-pointer ${btnEstadoClase}">Finalizado: ${r.finalizado}</button>`
+            }
+            <div class="flex gap-1.5">
+              <button type="button" onclick="editarRegistro('${r.id}')" class="px-3 py-1.5 text-xs font-semibold bg-indigo-50 text-indigo-700 rounded-lg">Editar</button>
+              <button type="button" onclick="pedirEliminar('${r.id}')" class="px-3 py-1.5 text-xs font-semibold bg-rose-50 text-rose-700 rounded-lg">Eliminar</button>
+            </div>
+          </div>
+        `;
+        movil.appendChild(card);
+      });
+    }
+
+    function renderizarDashboard() {
+      const validas = registros.filter(r => r.anulado !== 'SI');
+      const total = validas.length;
+      const finSi = validas.filter(r => r.finalizado === 'SI').length;
+      const finNo = total - finSi;
+      const pctSi = calcularPorcentaje(finSi, total);
+      const pctNo = calcularPorcentaje(finNo, total);
+
+      document.getElementById('dashAvanceGeneralPct').textContent = `${pctSi}%`;
+      document.getElementById('barGeneralSi').style.width = `${pctSi}%`;
+      document.getElementById('barGeneralNo').style.width = `${pctNo}%`;
+      document.getElementById('dashGeneralSiText').textContent = `${finSi} (${pctSi}%)`;
+      document.getElementById('dashGeneralNoText').textContent = `${finNo} (${pctNo}%)`;
+
+      const conMov = validas.filter(r => r.movimiento && r.movimiento.trim() !== '');
+      const totalMov = conMov.length;
+      const movSi = conMov.filter(r => r.movCulminado === 'SI').length;
+      const movNo = totalMov - movSi;
+      const pctMovSi = calcularPorcentaje(movSi, totalMov);
+      const pctMovNo = calcularPorcentaje(movNo, totalMov);
+
+      document.getElementById('dashMovPct').textContent = `${pctMovSi}%`;
+      document.getElementById('barMovSi').style.width = `${pctMovSi}%`;
+      document.getElementById('barMovNo').style.width = `${pctMovNo}%`;
+      document.getElementById('dashMovSiText').textContent = `${movSi} (${pctMovSi}%)`;
+      document.getElementById('dashMovNoText').textContent = `${movNo} (${pctMovNo}%)`;
+
+      const prioConfig = [
+        { key: 'ALTA', label: 'Prioridad ALTA', bar: 'bg-rose-500', badge: 'text-rose-700 bg-rose-50' },
+        { key: 'MEDIA', label: 'Prioridad MEDIA', bar: 'bg-amber-500', badge: 'text-amber-700 bg-amber-50' },
+        { key: 'BAJA', label: 'Prioridad BAJA', bar: 'bg-sky-500', badge: 'text-sky-700 bg-sky-50' }
+      ];
+      const prioContainer = document.getElementById('dashPrioridadesContainer');
+      prioContainer.innerHTML = prioConfig.map(p => {
+        const cant = validas.filter(r => r.prioridad === p.key).length;
+        const pend = validas.filter(r => r.prioridad === p.key && r.finalizado === 'NO').length;
+        const pct = calcularPorcentaje(cant, total);
+        return `
+          <div>
+            <div class="flex justify-between items-center mb-1">
+              <span class="font-semibold text-slate-700">${p.label} <span class="text-slate-400 font-normal">(${pend} pend.)</span></span>
+              <span class="px-2 py-0.5 rounded font-bold ${p.badge}">${cant} (${pct}%)</span>
+            </div>
+            <div class="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden">
+              <div class="${p.bar} h-full rounded-full transition-all duration-500" style="width: ${pct}%"></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      const tbodyDig = document.getElementById('tablaDashDigitacion');
+      let totalAsigDig = 0;
+      tbodyDig.innerHTML = LISTA_DIGITACION.map(nombre => {
+        const asig = validas.filter(r => r.digitacion === nombre);
+        const tot = asig.length;
+        totalAsigDig += tot;
+        const si = asig.filter(r => r.finalizado === 'SI').length;
+        const no = tot - si;
+        const pct = calcularPorcentaje(si, tot);
+        return `
+          <tr class="${tot === 0 ? 'opacity-55' : 'hover:bg-purple-50/40'}">
+            <td class="py-2.5 px-3 font-semibold text-slate-800">${escaparHTML(nombre)}</td>
+            <td class="py-2.5 px-2 text-center font-bold text-slate-700">${tot}</td>
+            <td class="py-2.5 px-2 text-center font-semibold text-emerald-700">${si}</td>
+            <td class="py-2.5 px-2 text-center font-semibold text-amber-600">${no}</td>
+            <td class="py-2.5 px-3">
+              <div class="flex items-center gap-2">
+                <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                  <div class="bg-purple-600 h-full rounded-full" style="width: ${pct}%"></div>
+                </div>
+                <span class="text-xs font-bold text-slate-700 w-9 text-right">${pct}%</span>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+      document.getElementById('totalAsignadoDig').textContent = `${totalAsigDig} asignadas`;
+
+      const tbodyMov = document.getElementById('tablaDashMovimiento');
+      let totalAsigMov = 0;
+      tbodyMov.innerHTML = LISTA_MOVIMIENTO.map(nombre => {
+        const asig = validas.filter(r => r.movimiento === nombre);
+        const tot = asig.length;
+        totalAsigMov += tot;
+        const mSi = asig.filter(r => r.movCulminado === 'SI').length;
+        const mNo = tot - mSi;
+        const fSi = asig.filter(r => r.finalizado === 'SI').length;
+        const pctMov = calcularPorcentaje(mSi, tot);
+        return `
+          <tr class="${tot === 0 ? 'opacity-55' : 'hover:bg-blue-50/40'}">
+            <td class="py-2.5 px-3 font-semibold text-slate-800">${escaparHTML(nombre)}</td>
+            <td class="py-2.5 px-2 text-center font-bold text-slate-700">${tot}</td>
+            <td class="py-2.5 px-2 text-center font-semibold text-blue-700">${mSi}</td>
+            <td class="py-2.5 px-2 text-center font-semibold text-rose-600">${mNo}</td>
+            <td class="py-2.5 px-2 text-center font-semibold text-emerald-700">${fSi}</td>
+            <td class="py-2.5 px-3">
+              <div class="flex items-center gap-2">
+                <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                  <div class="bg-blue-600 h-full rounded-full" style="width: ${pctMov}%"></div>
+                </div>
+                <span class="text-xs font-bold text-slate-700 w-9 text-right">${pctMov}%</span>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+      document.getElementById('totalAsignadoMov').textContent = `${totalAsigMov} asignadas`;
+
+      const pendientesGlobales = validas.filter(r => r.finalizado === 'NO' || (r.movimiento && r.movCulminado !== 'SI'));
+      document.getElementById('badgeTotalPendientesDash').textContent = `${pendientesGlobales.length} atenciones con pendiente`;
+
+      const todasPersonas = Array.from(new Set([...LISTA_DIGITACION, ...LISTA_MOVIMIENTO]));
+      const contPend = document.getElementById('contenedorPendientesPorPersona');
+
+      const tarjetasHTML = todasPersonas.map(persona => {
+        const tareas = validas.filter(r =>
+          (r.digitacion === persona && r.finalizado === 'NO') ||
+          (r.movimiento === persona && (r.finalizado === 'NO' || r.movCulminado !== 'SI'))
+        );
+        if (tareas.length === 0) return '';
+
+        const itemsList = tareas.map(t => {
+          const roles = [];
+          if (t.digitacion === persona) roles.push('Digitación');
+          if (t.movimiento === persona) roles.push(t.movCulminado === 'SI' ? 'Mov. ✓' : 'Mov. Pend.');
+          return `
+            <li class="p-2 bg-slate-50 rounded-lg border border-slate-200/80 text-xs space-y-1">
+              <div class="flex items-center justify-between gap-1">
+                <span class="font-mono font-bold text-slate-800">${escaparHTML(t.correlativo)} · ${escaparHTML(t.ticket || t.documento)}</span>
+                ${badgePrioridad(t.prioridad)}
+              </div>
+              <p class="text-slate-700 font-medium line-clamp-1" title="${escaparHTML(t.asunto)}">${escaparHTML(t.asunto || t.usuario)}</p>
+              <div class="flex items-center justify-between text-[11px] text-slate-500">
+                <span>Rol: <strong>${roles.join(' + ')}</strong></span>
+                <button type="button" onclick="editarRegistro('${t.id}')" class="text-indigo-600 hover:underline font-semibold cursor-pointer">Abrir</button>
+              </div>
+            </li>
+          `;
+        }).join('');
+
+        return `
+          <div class="border border-slate-200 rounded-xl p-3.5 bg-white shadow-2xs flex flex-col">
+            <div class="flex items-center justify-between pb-2 mb-2.5 border-b border-slate-100">
+              <span class="font-bold text-sm text-slate-800">${escaparHTML(persona)}</span>
+              <span class="px-2 py-0.5 bg-amber-100 text-amber-800 text-xs font-bold rounded-full">${tareas.length} pend.</span>
+            </div>
+            <ul class="space-y-2 max-h-56 overflow-y-auto custom-scrollbar pr-1">
+              ${itemsList}
+            </ul>
+          </div>
+        `;
+      }).filter(Boolean).join('');
+
+      contPend.innerHTML = tarjetasHTML || '<p class="text-xs text-slate-500 col-span-full text-center py-4">No hay atenciones pendientes asignadas.</p>';
+    }
+
+    function limpiarFiltros() {
+      document.getElementById('filtroBusqueda').value = '';
+      document.getElementById('filtroEstado').value = '';
+      document.getElementById('filtroPrioridad').value = '';
+      document.getElementById('filtroAsistente').value = '';
+      renderizar();
+    }
+
+    function ponerFechaHoraActual(idCampo) {
+      document.getElementById(idCampo).value = obtenerFechaHoraISOActual();
+    }
+
+    function alCambiarCulminadoMov() {
+      const val = document.querySelector('input[name="campoMovCulminado"]:checked').value;
+      const inputFecha = document.getElementById('campoFechaCulminacionMov');
+      if (val === 'SI' && !inputFecha.value) {
+        inputFecha.value = obtenerFechaHoraISOActual();
+      } else if (val === 'NO') {
+        inputFecha.value = '';
+      }
+    }
+
+    function alCambiarAnulado() {
+      const val = document.querySelector('input[name="campoAnulado"]:checked').value;
+      const box = document.getElementById('contenedorObsAnulacion');
+      const textarea = document.getElementById('campoObsAnulacion');
+      if (val === 'SI') {
+        box.classList.remove('hidden');
+        textarea.setAttribute('required', 'required');
+      } else {
+        box.classList.add('hidden');
+        textarea.removeAttribute('required');
+      }
+    }
+
+    function abrirModalNuevo() {
+      document.getElementById('modalTitulo').textContent = 'Nueva Atención Patrimonial';
+      document.getElementById('formAtencion').reset();
+      document.getElementById('campoId').value = '';
+
+      const sigNum = obtenerSiguienteCorrelativo();
+      document.getElementById('campoCorrelativo').value = formatearCorrelativo(sigNum);
+
+      document.getElementById('alertaDuplicado').classList.add('hidden');
+      document.getElementById('msgDupTicket').classList.add('hidden');
+      document.getElementById('msgDupDocumento').classList.add('hidden');
+      document.getElementById('campoTicket').classList.remove('border-rose-500', 'bg-rose-50/40');
+      document.getElementById('campoDocumento').classList.remove('border-rose-500', 'bg-rose-50/40');
+
+      const hoy = new Date().toISOString().slice(0, 10);
+      document.getElementById('campoFechaCorreo').value = hoy;
+      ponerFechaHoraActual('campoFechaAtencion');
+      document.getElementById('campoFechaCulminacionMov').value = '';
+      alCambiarAnulado();
+      document.getElementById('modalFormulario').classList.remove('hidden');
+    }
+
+    function cerrarModalFormulario() {
+      document.getElementById('modalFormulario').classList.add('hidden');
+    }
+
+    function editarRegistro(id) {
+      const item = registros.find(r => r.id === id);
+      if (!item) return;
+
+      document.getElementById('modalTitulo').textContent = 'Editar Atención Patrimonial';
+      document.getElementById('campoId').value = item.id;
+      document.getElementById('campoCorrelativo').value = item.correlativo || formatearCorrelativo(item.correlativoNum || 1);
+      document.getElementById('campoTicket').value = item.ticket || '';
+      document.getElementById('campoUsuario').value = item.usuario;
+      document.getElementById('campoCorreo').value = item.correo;
+      document.getElementById('campoAsunto').value = item.asunto || '';
+      document.getElementById('campoFechaCorreo').value = item.fechaCorreo;
+      document.getElementById('campoDocumento').value = item.documento;
+      document.getElementById('campoDigitacion').value = item.digitacion || '';
+      document.getElementById('campoMovimiento').value = item.movimiento || '';
+      document.getElementById('campoPrioridad').value = item.prioridad;
+      document.getElementById('campoFechaAtencion').value = item.fechaAtencion || '';
+      document.getElementById('campoFechaCulminacionMov').value = item.fechaCulminacionMov || '';
+      document.getElementById('campoObservaciones').value = item.observaciones || '';
+      document.getElementById('campoObsAnulacion').value = item.obsAnulacion || '';
+
+      const radiosMov = document.getElementsByName('campoMovCulminado');
+      radiosMov.forEach(rad => { rad.checked = (rad.value === (item.movCulminado || 'NO')); });
+
+      const radiosFin = document.getElementsByName('campoFinalizado');
+      radiosFin.forEach(rad => { rad.checked = (rad.value === item.finalizado); });
+
+      const radiosAnul = document.getElementsByName('campoAnulado');
+      radiosAnul.forEach(rad => { rad.checked = (rad.value === (item.anulado || 'NO')); });
+
+      alCambiarAnulado();
+      verificarDuplicadosEnTiempoReal();
+      document.getElementById('modalFormulario').classList.remove('hidden');
+    }
+
+    function pedirEliminar(id) {
+      idAEliminar = id;
+      document.getElementById('modalEliminar').classList.remove('hidden');
+    }
+
+    function cerrarModalEliminar() {
+      idAEliminar = null;
+      document.getElementById('modalEliminar').classList.add('hidden');
+    }
+
+    function toggleMenuExportar() {
+      document.getElementById('menuExportar').classList.toggle('hidden');
+    }
+
+    document.addEventListener('click', (e) => {
+      const menu = document.getElementById('menuExportar');
+      if (!e.target.closest('.relative')) {
+        menu.classList.add('hidden');
+      }
+    });
+
+    function exportarCSV() {
+      document.getElementById('menuExportar').classList.add('hidden');
+      const cabeceras = [
+        'Correlativo Interno', 'N° Ticket', 'Usuario Solicitante', 'Correo', 
+        'Asunto del Correo', 'Fecha Correo', 'N° Documento', 'Asistente Digitación', 
+        'Asistente Movimiento', 'Culminó Movimiento', 'Fecha y Hora Culminación Mov.', 
+        'Prioridad', 'Fecha y Hora Atención', 'Observaciones', 'Finalizado', 
+        'Anulado', 'Observación Anulación'
+      ];
+
+      const filas = registros.map(r => [
+        r.correlativo || '', r.ticket || '', r.usuario, r.correo, r.asunto || '', 
+        r.fechaCorreo, r.documento, r.digitacion, r.movimiento, r.movCulminado || 'NO', 
+        formatearFechaHora(r.fechaCulminacionMov), r.prioridad, formatearFechaHora(r.fechaAtencion), 
+        r.observaciones, r.finalizado, r.anulado || 'NO', r.obsAnulacion || ''
+      ].map(campo => `"${String(campo || '').replace(/"/g, '""')}"`).join(';'));
+
+      const contenidoCSV = '\uFEFF' + [cabeceras.join(';'), ...filas].join('\n');
+      descargarArchivo(contenidoCSV, `atenciones_patrimonio_${new Date().toISOString().slice(0,10)}.csv`, 'text/csv;charset=utf-8;');
+    }
+
+    function exportarJSON() {
+      document.getElementById('menuExportar').classList.add('hidden');
+      const contenidoJSON = JSON.stringify(registros, null, 2);
+      descargarArchivo(contenidoJSON, `respaldo_patrimonio_${new Date().toISOString().slice(0,10)}.json`, 'application/json');
+    }
+
+    function descargarArchivo(contenido, nombreArchivo, tipoMime) {
+      try {
+        const blob = new Blob([contenido], { type: tipoMime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = nombreArchivo;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        mostrarToast('Archivo generado');
+      } catch (e) {
+        abrirModalRespaldoTexto();
+      }
+    }
+
+    function abrirModalRespaldoTexto() {
+      document.getElementById('menuExportar').classList.add('hidden');
+      document.getElementById('textareaRespaldo').value = JSON.stringify(registros, null, 2);
+      document.getElementById('msgCopiado').classList.add('hidden');
+      document.getElementById('modalRespaldoTexto').classList.remove('hidden');
+    }
+
+    function cerrarModalRespaldoTexto() {
+      document.getElementById('modalRespaldoTexto').classList.add('hidden');
+    }
+
+    function copiarRespaldoAlPortapapeles() {
+      const textarea = document.getElementById('textareaRespaldo');
+      textarea.select();
+      textarea.setSelectionRange(0, 99999);
+      try {
+        document.execCommand('copy');
+        document.getElementById('msgCopiado').classList.remove('hidden');
+      } catch (e) {
+        mostrarToast('Selecciona el texto y presiona Ctrl+C');
+      }
+    }
+
+    function abrirModalImportar() {
+      document.getElementById('textoImportar').value = '';
+      document.getElementById('archivoImportar').value = '';
+      document.getElementById('modalImportar').classList.remove('hidden');
+    }
+
+    function cerrarModalImportar() {
+      document.getElementById('modalImportar').classList.add('hidden');
+    }
+
+    function procesarArchivoImportado(event) {
+      const archivo = event.target.files[0];
+      if (!archivo) return;
+
+      const lector = new FileReader();
+      lector.onload = function(e) {
+        const contenido = e.target.result;
+        if (archivo.name.endsWith('.json')) {
+          document.getElementById('textoImportar').value = contenido;
+        } else if (archivo.name.endsWith('.csv')) {
+          const importadosCSV = parsearCSV(contenido);
+          document.getElementById('textoImportar').value = JSON.stringify(importadosCSV, null, 2);
+        }
+      };
+      lector.readAsText(archivo);
+    }
+
+    function parsearCSV(texto) {
+      const lineas = texto.split(/\r?\n/).filter(l => l.trim() !== '');
+      if (lineas.length < 2) return [];
+      const separador = lineas[0].includes(';') ? ';' : ',';
+      const resultado = [];
+
+      for (let i = 1; i < lineas.length; i++) {
+        const cols = lineas[i].split(separador).map(c => c.replace(/^"|"$/g, '').replace(/""/g, '"').trim());
+        if (cols.length >= 7) {
+          const numCorr = parseInt(String(cols[0] || '').replace(/\D/g, ''), 10) || (ultimoCorrelativoNumero + i);
+          resultado.push({
+            id: String(Date.now() + i),
+            correlativo: cols[0] || formatearCorrelativo(numCorr),
+            correlativoNum: numCorr,
+            ticket: cols[1] || '',
+            usuario: cols[2] || '',
+            correo: cols[3] || '',
+            asunto: cols[4] || '',
+            fechaCorreo: cols[5] || '',
+            documento: cols[6] || '',
+            digitacion: cols[7] || '',
+            movimiento: cols[8] || '',
+            movCulminado: cols[9] === 'SI' ? 'SI' : 'NO',
+            fechaCulminacionMov: (cols[10] && cols[10] !== '-') ? cols[10].replace(' ', 'T') : '',
+            prioridad: ['ALTA', 'MEDIA', 'BAJA'].includes(cols[11]) ? cols[11] : 'MEDIA',
+            fechaAtencion: (cols[12] && cols[12] !== '-') ? cols[12].replace(' ', 'T') : '',
+            observaciones: cols[13] || '',
+            finalizado: cols[14] === 'SI' ? 'SI' : 'NO',
+            anulado: cols[15] === 'SI' ? 'SI' : 'NO',
+            obsAnulacion: cols[16] || ''
+          });
+        }
+      }
+      return resultado;
+    }
+
+    async function importarDesdeTexto(reemplazar) {
+      const raw = document.getElementById('textoImportar').value.trim();
+      if (!raw) {
+        mostrarToast('Pega o selecciona un archivo primero');
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || !Array.isArray(parsed)) throw new Error('Formato inválido');
+
+        mostrarToast('Importando registros a Firestore, por favor espera...');
+        for (const item of parsed) {
+          if (!item.correlativo) {
+            const nextN = obtenerSiguienteCorrelativo();
+            ultimoCorrelativoNumero = nextN;
+            item.correlativoNum = nextN;
+            item.correlativo = formatearCorrelativo(nextN);
+          } else {
+            const n = item.correlativoNum || parseInt(String(item.correlativo).replace(/\D/g, ''), 10) || 0;
+            if (n > ultimoCorrelativoNumero) ultimoCorrelativoNumero = n;
+          }
+          if (!item.anulado) item.anulado = 'NO';
+          if (!item.obsAnulacion) item.obsAnulacion = '';
+
+          // Subir a Firestore
+          await setDoc(doc(db, "atenciones", item.id || String(Date.now() + Math.random())), item);
+        }
+
+        cerrarModalImportar();
+        mostrarToast(`¡Se importaron ${parsed.length} registros exitosamente!`);
+      } catch (e) {
+        mostrarToast('Error: El formato JSON no es válido para importar.');
+        console.error(e);
+      }
+    }
+
+    // Vincular funciones al objeto window para mantener la funcionalidad de los botones HTML
+    window.cambiarVista = cambiarVista;
+    window.limpiarFiltros = limpiarFiltros;
+    window.ponerFechaHoraActual = ponerFechaHoraActual;
+    window.alCambiarCulminadoMov = alCambiarCulminadoMov;
+    window.alCambiarAnulado = alCambiarAnulado;
+    window.abrirModalNuevo = abrirModalNuevo;
+    window.cerrarModalFormulario = cerrarModalFormulario;
+    window.editarRegistro = editarRegistro;
+    window.guardarAtencion = guardarAtencion;
+    window.alternarMovCulminado = alternarMovCulminado;
+    window.alternarFinalizado = alternarFinalizado;
+    window.pedirEliminar = pedirEliminar;
+    window.cerrarModalEliminar = cerrarModalEliminar;
+    window.confirmarEliminar = confirmarEliminar;
+    window.toggleMenuExportar = toggleMenuExportar;
+    window.exportarCSV = exportarCSV;
+    window.exportarJSON = exportarJSON;
+    window.abrirModalRespaldoTexto = abrirModalRespaldoTexto;
+    window.cerrarModalRespaldoTexto = cerrarModalRespaldoTexto;
+    window.copiarRespaldoAlPortapapeles = copiarRespaldoAlPortapapeles;
+    window.abrirModalImportar = abrirModalImportar;
+    window.cerrarModalImportar = cerrarModalImportar;
+    window.procesarArchivoImportado = procesarArchivoImportado;
+    window.importarDesdeTexto = importarDesdeTexto;
+    window.verificarDuplicadosEnTiempoReal = verificarDuplicadosEnTiempoReal;
+  </script>
